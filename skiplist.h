@@ -4,62 +4,33 @@
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
+#include <memory>
+#include <vector>
+#include <time.h>
 using namespace std;
 
 mutex mtx; // 互斥锁
 const char *STORE_ADDRESS = "store/storefile";
 const string delimiter = ":";
+
 template <typename K, typename V>
 class Node
 {
 public:
-    Node() = default;
-    Node(K key, V val, int level);
-    ~Node();
-    K getKey() const;
-    V getValue() const;
-    void setValue(V);
+    Node(){};
+    Node(K k, V v, int level) : key(k), value(v), node_level(level), forward(level, nullptr){};
+    ~Node(){};
+    K getKey() const { return this->key; };
+    V getValue() const { return this->value; };
+    void setValue(V v) { this->value = v; };
     // 数组保存指向不同级别的下一个节点的指针
-    Node<K, V> **forward;
+    vector<shared_ptr<Node<K, V>>> forward;
     int node_level;
 
 private:
     K key;
     V value;
 };
-
-template <typename K, typename V>
-Node<K, V>::Node(K k, V v, int level)
-{
-    this->key = k;
-    this->value = v;
-    this->node_level = level;
-    this->forward = new Node<K, V> *[level + 1];
-    memset(this->forward, 0, sizeof(Node<K, V> *) * (level + 1));
-}
-template <typename K, typename V>
-Node<K, V>::~Node()
-{
-    delete[] forward;
-}
-
-template <typename K, typename V>
-K Node<K, V>::getKey() const
-{
-    return this->key;
-}
-
-template <typename K, typename V>
-V Node<K, V>::getValue() const
-{
-    return this->value;
-}
-
-template <typename K, typename V>
-void Node<K, V>::setValue(V v)
-{
-    this->value = v;
-}
 
 template <typename K, typename V>
 class SkipList
@@ -70,8 +41,8 @@ public:
     int get_random_level() const;
     bool search_element(K) const;
     int insert_element(K, V);
-    void clear(Node<K, V> *cur);
-    Node<K, V> *create_node(K, V, int);
+    // void clear(Node<K, V> *cur);
+    shared_ptr<Node<K, V>> create_Node(K, V, int);
     void delete_node(K);
     void display_list() const;
     void dump_file();
@@ -81,9 +52,9 @@ public:
 private:
     void getKeyValueFromString(const string &str, string &key, string &value) const;
     bool isValid(const string &str) const;
-    int max_level;       // 最大等级
-    int skip_list_level; // 当前等级
-    Node<K, V> *header;  // 头结点
+    int max_level;                 // 最大等级
+    int skip_list_level;           // 当前等级
+    shared_ptr<Node<K, V>> header; // 头结点
     int element_count;
     ofstream file_write;
     ifstream file_read;
@@ -91,15 +62,14 @@ private:
 template <typename K, typename V>
 int SkipList<K, V>::insert_element(K k, V v)
 {
-    mtx.lock();
-    Node<K, V> *curnode = this->header;
+    unique_lock<mutex> lck(mtx);
+    auto curnode = header;
     // 相当于待插入节点的前一节点
     // 同时也保存了每一层要插入节点的前一位置
-    Node<K, V> *update[max_level + 1];
-    memset(update, 0, sizeof(Node<K, V> *) * (max_level + 1));
+    vector<shared_ptr<Node<K, V>>> update(max_level + 1, nullptr);
     for (int i = skip_list_level; i >= 0; i--)
     {
-        while (curnode->forward[i] && curnode->forward[i]->getKey() < k)
+        while (curnode->forward[i] != nullptr && curnode->forward[i]->getKey() < k)
         {
             curnode = curnode->forward[i];
         }
@@ -109,28 +79,27 @@ int SkipList<K, V>::insert_element(K k, V v)
     // 要插入位置的下一节点
     curnode = curnode->forward[0];
     // 插入节点已经存在
-    if (curnode != NULL && curnode->getKey() == k)
+    if (curnode != nullptr && curnode->getKey() == k)
     {
         cout << "要插入节点" << k << "已经存在" << endl;
-        mtx.unlock();
         return 1;
     }
-    if (curnode == NULL || curnode->getKey() != k)
+    if (curnode == nullptr || curnode->getKey() != k)
     {
         // 获取插入节点的随机级别
         int random_level = get_random_level();
+        //cout << random_level << endl;
         if (random_level > skip_list_level)
         {
-            for (int i = skip_list_level + 1; i < random_level + 1; i++)
+            for (int i = skip_list_level + 1; i < random_level; i++)
             {
                 update[i] = header;
             }
-            skip_list_level = random_level;
+            skip_list_level = random_level - 1;
         }
 
-        Node<K, V> *insert_node = create_node(k, v, random_level);
-
-        for (int i = 0; i <= random_level; i++)
+        auto insert_node = create_Node(k, v, random_level);
+        for (int i = 0; i < random_level; i++)
         {
             insert_node->forward[i] = update[i]->forward[i];
             update[i]->forward[i] = insert_node;
@@ -138,7 +107,6 @@ int SkipList<K, V>::insert_element(K k, V v)
         cout << "插入成功,key= " << k << " value= " << v << endl;
         element_count++;
     }
-    mtx.unlock();
     return 0;
 }
 // 返回节点个数
@@ -149,24 +117,11 @@ int SkipList<K, V>::size() const
 }
 
 template <typename K, typename V>
-SkipList<K, V>::SkipList(int maxlevel)
+SkipList<K, V>::SkipList(int maxlevel) : max_level(maxlevel), skip_list_level(0), element_count(0)
 {
-    this->max_level = maxlevel;
-    this->skip_list_level = 0;
-    this->element_count = 0;
-    K k;
-    V v;
-    this->header = new Node<K, V>(k, v, maxlevel);
+    header = make_shared<Node<K, V>>(K(), V(), maxlevel);
 }
-template <typename K, typename V>
-void SkipList<K, V>::clear(Node<K, V> *cur)
-{
-    if (cur->forward[0] != nullptr)
-    {
-        clear(cur->forward[0]);
-    }
-    delete (cur);
-}
+
 template <typename K, typename V>
 SkipList<K, V>::~SkipList()
 {
@@ -178,17 +133,12 @@ SkipList<K, V>::~SkipList()
     {
         file_read.close();
     }
-    if (header->forward[0] != nullptr)
-    {
-        clear(header->forward[0]);
-    }
-    delete (header);
 }
 
 template <typename K, typename V>
 bool SkipList<K, V>::search_element(K k) const
 {
-    Node<K, V> *curnode = header;
+    auto curnode = header;
     for (int i = skip_list_level; i >= 0; i--)
     {
         while (curnode->forward[i] && curnode->forward[i]->getKey() < k)
@@ -209,10 +159,9 @@ bool SkipList<K, V>::search_element(K k) const
 template <typename K, typename V>
 void SkipList<K, V>::delete_node(K k)
 {
-    mtx.lock();
-    Node<K, V> *update[max_level + 1];
-    Node<K, V> *curnode = header;
-    memset(update, 0, sizeof(Node<K, V> *) * (max_level + 1));
+    unique_lock<mutex> lck(mtx);
+    vector<shared_ptr<Node<K, V>>> update(max_level + 1, nullptr);
+    auto curnode = header;
     for (int i = skip_list_level; i >= 0; i--)
     {
         while (curnode->forward[i] && curnode->forward[i]->getKey() < k)
@@ -242,18 +191,15 @@ void SkipList<K, V>::delete_node(K k)
             skip_list_level--;
         }
         cout << "成功删除元素key: " << k << ", value: " << curnode->getValue() << endl;
-        delete curnode;
         element_count--;
     }
-    mtx.unlock();
     return;
 }
 
 template <typename K, typename V>
-Node<K, V> *SkipList<K, V>::create_node(K k, V v, int level)
+shared_ptr<Node<K, V>> SkipList<K, V>::create_Node(K k, V v, int level)
 {
-    Node<K, V> *node = new Node<K, V>(k, v, level);
-    return node;
+    return make_shared<Node<K, V>>(k, v, level);
 }
 
 template <typename K, typename V>
@@ -262,12 +208,12 @@ void SkipList<K, V>::display_list() const
     cout << "*******Skip List********" << endl;
     for (int i = 0; i <= skip_list_level; i++)
     {
-        Node<K, V> *node = this->header->forward[i];
+        auto curnode = this->header->forward[i];
         cout << "Level:" << i << ":";
-        while (node != nullptr)
+        while (curnode != nullptr)
         {
-            cout << node->getKey() << ":" << node->getValue() << ";";
-            node = node->forward[i];
+            cout << curnode->getKey() << ":" << curnode->getValue() << ";";
+            curnode = curnode->forward[i];
         }
         cout << endl;
     }
@@ -297,7 +243,7 @@ template <typename K, typename V>
 void SkipList<K, V>::dump_file()
 {
     cout << "***********dump_file***********" << endl;
-    Node<K, V> *node = this->header->forward[0];
+    auto node = this->header->forward[0];
     file_write.open(STORE_ADDRESS);
     while (node != nullptr)
     {
@@ -341,9 +287,6 @@ int SkipList<K, V>::get_random_level() const
     {
         level++;
     }
-    if (level >= max_level)
-    {
-        level = max_level;
-    }
+    level = level > max_level ? max_level : level;
     return level;
-}
+};
